@@ -181,7 +181,7 @@ class ltp(Exchange, ImplicitAPI):
         nonce = str(int(self.seconds()))
         sorted_params = sorted(params.items())
         query_string = '&'.join(str(k) + '=' + str(v) for k, v in sorted_params)
-        sign_string = query_string + '&' + nonce if query_string else nonce
+        sign_string = query_string + '&' + nonce
         signature = self.hmac(
             self.encode(sign_string),
             self.encode(self.secret),

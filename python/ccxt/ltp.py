@@ -186,10 +186,12 @@ class ltp(Exchange, ImplicitAPI):
     def sign(self, path, api='public', method='GET', params={}, headers=None, body=None):
         url = self.urls['api']['rest'] + '/' + path
         nonce = str(int(self.seconds()))
-        # Sort params alphabetically, join key=value with &, append &nonce
+        # Sort params alphabetically, join key=value with &, append &nonce.
+        # Note: LTP always expects "&{nonce}" suffix even when params is
+        # empty — the sign string for no params is "&1234567890", not "1234567890".
         sorted_params = sorted(params.items())
         query_string = '&'.join(str(k) + '=' + str(v) for k, v in sorted_params)
-        sign_string = query_string + '&' + nonce if query_string else nonce
+        sign_string = query_string + '&' + nonce
         signature = self.hmac(
             self.encode(sign_string),
             self.encode(self.secret),
