@@ -46,7 +46,25 @@ class ltp(ccxt.async_support.ltp):
         await self.load_markets()
         url = self.urls['api']['ws']
         message_hash = 'balance'
-        await self.authenticate(url)
+        subscribe_hash = 'balance:login'
+        # Build a fresh login message each time (timestamp must be current).
+        # watch() sends this after establishing the WS connection.
+        self.check_required_credentials()
+        timestamp = str(int(self.seconds()))
+        sign_string = timestamp + 'GET' + '/users/self/verify'
+        signature = self.hmac(
+            self.encode(sign_string),
+            self.encode(self.secret),
+            hashlib.sha256,
+        )
+        login_request = {
+            'action': 'login',
+            'args': {
+                'apiKey': self.apiKey,
+                'timestamp': timestamp,
+                'sign': signature,
+            },
+        }
         client = self.client(url)
         # First call: seed balance from REST and spawn background loops
         if 'balance:seeded' not in client.subscriptions:
@@ -65,47 +83,24 @@ class ltp(ccxt.async_support.ltp):
             # Spawn periodic background tasks
             self.spawn(self.funding_refresh_loop, url)
             self.spawn(self.heartbeat_loop, url)
-        return await self.watch(url, message_hash, None, message_hash)
-
-    async def authenticate(self, url, params={}):
-        client = self.client(url)
-        message_hash = 'authenticated'
-        authenticated = self.safe_value(client.subscriptions, message_hash)
-        if authenticated is not None:
-            return
-        self.check_required_credentials()
-        timestamp = str(int(self.seconds()))
-        sign_string = timestamp + 'GET' + '/users/self/verify'
-        signature = self.hmac(
-            self.encode(sign_string),
-            self.encode(self.secret),
-            hashlib.sha256,
-        )
-        request = json.dumps({
-            'action': 'login',
-            'args': {
-                'apiKey': self.apiKey,
-                'timestamp': timestamp,
-                'sign': signature,
-            },
-        })
-        future = client.future(message_hash)
-        await client.send(request)
-        return await future
+        # watch() establishes the WS connection, then sends login_request.
+        # LTP auto-pushes 'assets' channel after successful login — no
+        # explicit subscribe needed.
+        return await self.watch(url, message_hash, login_request, subscribe_hash)
 
     async def heartbeat_loop(self, url):
         """Send raw 'ping' string every heartbeatInterval ms."""
         client = self.client(url)
         ws_options = self.safe_dict(self.options, 'ws', {})
         interval = self.safe_integer(ws_options, 'heartbeatInterval', 20000)
-        while client.connected:
-            try:
+        try:
+            while True:
                 await self.sleep(interval)
                 if not client.connected:
                     break
                 await client.send('ping')
-            except Exception:
-                break
+        except Exception:
+            pass  # CancelledError on close is expected
 
     async def funding_refresh_loop(self, url):
         """Periodically fetch funding balance via REST and merge.
@@ -117,8 +112,8 @@ class ltp(ccxt.async_support.ltp):
         client = self.client(url)
         ws_options = self.safe_dict(self.options, 'ws', {})
         interval = self.safe_integer(ws_options, 'fundingRefreshInterval', 60000)
-        while client.connected:
-            try:
+        try:
+            while True:
                 await self.sleep(interval)
                 if not client.connected:
                     break
@@ -126,15 +121,14 @@ class ltp(ccxt.async_support.ltp):
                 self.merge_funding_balance(funding)
                 # Wake up awaiters with the updated balance
                 client.resolve(self.balance, 'balance')
-            except Exception:
-                pass  # Log-worthy but don't crash the loop
+        except Exception:
+            pass  # CancelledError on close is expected
 
     def merge_funding_balance(self, funding):
         """Merge REST funding balance into self.balance without
         touching trading keys (WS owns those)."""
         if self.balance is None:
             self.balance = {'info': {}, 'timestamp': None, 'datetime': None}
-        # Copy per-currency entries from funding, skipping metadata keys
         skip_keys = {'info', 'timestamp', 'datetime', 'free', 'used', 'total'}
         for key in funding:
             if key not in skip_keys:
@@ -148,24 +142,11 @@ class ltp(ccxt.async_support.ltp):
         skip_keys = {'info', 'timestamp', 'datetime', 'free', 'used', 'total'}
         for key in trading:
             if key not in skip_keys:
-                # Trading balance is USDT equity — merge additively if
-                # funding already has USDT.  Store under a separate
-                # 'USDT:trading' internal key would over-complicate;
-                # instead, if USDT exists from funding, add trading equity.
-                if key in self.balance and key not in skip_keys:
-                    existing = self.balance[key]
-                    existing_total = self.safe_float(existing, 'total', 0)
-                    trading_total = self.safe_float(trading[key], 'total', 0)
-                    if existing_total > 0 and trading_total > 0:
-                        # Don't double-count; trading USDT is separate
-                        # from funding USDT.  Use the trading value for
-                        # the 'used' (margin) portion.
-                        pass
                 self.balance[key] = trading[key]
         self.balance = self.safe_balance(self.balance)
 
     def handle_message(self, client: Client, message):
-        # Raw pong response
+        # Raw pong response (LTP sends 'pong' as plain text)
         if isinstance(message, str):
             if message == 'pong':
                 return
@@ -180,12 +161,14 @@ class ltp(ccxt.async_support.ltp):
         if event == 'login':
             code = self.safe_string(message, 'code')
             if code == '0':
-                client.resolve(True, 'authenticated')
-                client.subscriptions['authenticated'] = True
+                # Login succeeded — resolve the balance future with
+                # the seeded balance so the first await returns immediately.
+                if self.balance is not None:
+                    client.resolve(self.balance, 'balance')
             else:
                 msg = self.safe_string(message, 'msg', 'login failed')
                 error = ExchangeError(self.id + ' ' + msg)
-                client.reject(error, 'authenticated')
+                client.reject(error, 'balance')
             return
         # Assets channel — trading balance push
         channel = self.safe_string(message, 'channel', '')
