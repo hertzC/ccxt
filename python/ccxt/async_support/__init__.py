@@ -145,6 +145,7 @@ from ccxt.async_support.kucoinfutures import kucoinfutures                      
 from ccxt.async_support.latoken import latoken                                  # noqa: F401
 from ccxt.async_support.lbank import lbank                                      # noqa: F401
 from ccxt.async_support.lighter import lighter                                  # noqa: F401
+from ccxt.async_support.ltp import ltp                                          # noqa: F401
 from ccxt.async_support.luno import luno                                        # noqa: F401
 from ccxt.async_support.mercado import mercado                                  # noqa: F401
 from ccxt.async_support.mexc import mexc                                        # noqa: F401
@@ -256,6 +257,7 @@ exchanges = [
     'latoken',
     'lbank',
     'lighter',
+    'ltp',
     'luno',
     'mercado',
     'mexc',
