@@ -69,6 +69,10 @@ class ltp(Exchange, ImplicitAPI):
                         'api/v1/trading/fundingFee/current': 1,
                         'api/v1/trading/portfolio/assets': 1,
                         'api/v1/sym/info': 1,
+                        # Execution endpoints (patch 007)
+                        'api/v1/trading/executions': 1,
+                        'api/v1/trading/executions/pageable': 1,
+                        'api/v1/trading/archive/executions/pageable': 1,
                     },
                 },
             },

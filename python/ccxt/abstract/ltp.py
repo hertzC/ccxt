@@ -19,3 +19,7 @@ class ImplicitAPI:
     private_get_api_v1_trading_fundingfee_current = privateGetApiV1TradingFundingfeeCurrent = Entry('api/v1/trading/fundingFee/current', 'private', 'GET', {'cost': 1})
     private_get_api_v1_trading_portfolio_assets = privateGetApiV1TradingPortfolioAssets = Entry('api/v1/trading/portfolio/assets', 'private', 'GET', {'cost': 1})
     private_get_api_v1_sym_info = privateGetApiV1SymInfo = Entry('api/v1/sym/info', 'private', 'GET', {'cost': 1})
+    # Execution endpoints (patch 007)
+    private_get_api_v1_trading_executions = privateGetApiV1TradingExecutions = Entry('api/v1/trading/executions', 'private', 'GET', {'cost': 1})
+    private_get_api_v1_trading_executions_pageable = privateGetApiV1TradingExecutionsPageable = Entry('api/v1/trading/executions/pageable', 'private', 'GET', {'cost': 1})
+    private_get_api_v1_trading_archive_executions_pageable = privateGetApiV1TradingArchiveExecutionsPageable = Entry('api/v1/trading/archive/executions/pageable', 'private', 'GET', {'cost': 1})
