@@ -237,6 +237,54 @@ class binance(ccxt.async_support.binance):
             return baseUrl.replace('/ws', '/' + category + '/ws')
         return baseUrl
 
+    def resolve_papi_alias(self, params={}):
+        """Translate ``defaultType='papi'`` (or
+        ``params['type']='papi'``) into the equivalent
+        ``defaultType='future'`` + ``portfolioMargin=True``.
+
+        Portfolio Margin uses the futures WS infrastructure
+        (URL ``wss://fstream.binance.com/pm/ws/<key>``,
+        same ``ACCOUNT_UPDATE`` / ``ORDER_TRADE_UPDATE``
+        event shapes) but with the ``papi`` listenKey
+        endpoint.  Internally CCXT already handles this
+        via the ``portfolioMargin`` option; this helper
+        just lets callers use the cleaner
+        ``defaultType='papi'`` entrypoint.
+
+        Patch 008.
+
+        Returns:
+            Tuple ``(params, isPapi)`` — params has any
+            ``type='papi'`` rewritten to ``'future'`` and
+            adds ``portfolioMargin=True``; isPapi is True
+            when the caller asked for papi.
+        """
+        defaultType = self.safe_string(
+            self.options, 'defaultType', '',
+        )
+        paramsType = self.safe_string(
+            params, 'type', '',
+        )
+        paramsDefaultType = self.safe_string(
+            params, 'defaultType', '',
+        )
+        isPapi = (
+            defaultType == 'papi'
+            or paramsType == 'papi'
+            or paramsDefaultType == 'papi'
+        )
+        if not isPapi:
+            return params, False
+        params = self.extend(params, {})
+        # Force type='future' so downstream
+        # handle_market_type_and_params returns 'future'
+        # regardless of whether options.defaultType is 'papi'.
+        params['type'] = 'future'
+        if params.get('defaultType') == 'papi':
+            params['defaultType'] = 'future'
+        params['portfolioMargin'] = True
+        return params, True
+
     def get_future_ws_category(self, channel):
         if channel == 'depth' or channel == 'rpiDepth' or channel == 'bookTicker' or channel == 'trade' or channel == 'aggTrade':
             return 'public'
@@ -2379,6 +2427,8 @@ class binance(ccxt.async_support.binance):
 
     async def authenticate(self, params={}):
         time = self.milliseconds()
+        # Patch 008: defaultType='papi' alias
+        params, _ = self.resolve_papi_alias(params)
         type = None
         type, params = self.handle_market_type_and_params('authenticate', None, params)
         subType = None
@@ -2430,7 +2480,11 @@ class binance(ccxt.async_support.binance):
 
     async def keep_alive_listen_key(self, params={}):
         # https://binance-docs.github.io/apidocs/spot/en/#listen-key-spot
+        # Patch 008: defaultType='papi' alias
+        params, _ = self.resolve_papi_alias(params)
         type = self.safe_string_2(self.options, 'defaultType', 'authenticate', 'spot')
+        if type == 'papi':
+            type = 'future'
         type = self.safe_string(params, 'type', type)
         isPortfolioMargin = None
         isPortfolioMargin, params = self.handle_option_and_params_2(params, 'keepAliveListenKey', 'papi', 'portfolioMargin', False)
@@ -2735,9 +2789,13 @@ class binance(ccxt.async_support.binance):
         :param boolean [params.portfolioMargin]: set to True if you would like to watch the balance of a portfolio margin account
         :returns dict: a `balance structure <https://docs.ccxt.com/?id=balance-structure>`
         """
+        # Patch 008: defaultType='papi' alias
+        params, _ = self.resolve_papi_alias(params)
         await self.load_markets()
         await self.authenticate(params)
         defaultType = self.safe_string(self.options, 'defaultType', 'spot')
+        if defaultType == 'papi':
+            defaultType = 'future'
         type = self.safe_string(params, 'type', defaultType)
         subType = None
         subType, params = self.handle_sub_type_and_params('watchBalance', None, params)
@@ -3460,6 +3518,8 @@ class binance(ccxt.async_support.binance):
         :param boolean [params.portfolioMargin]: set to True if you would like to watch portfolio margin account orders
         :returns dict[]: a list of `order structures <https://docs.ccxt.com/?id=order-structure>`
         """
+        # Patch 008: defaultType='papi' alias
+        params, _ = self.resolve_papi_alias(params)
         await self.load_markets()
         messageHash = 'orders'
         market = None
@@ -3801,6 +3861,8 @@ class binance(ccxt.async_support.binance):
         :param boolean [params.portfolioMargin]: set to True if you would like to watch positions in a portfolio margin account
         :returns dict[]: a list of `position structure <https://docs.ccxt.com/en/latest/manual.html#position-structure>`
         """
+        # Patch 008: defaultType='papi' alias
+        params, _ = self.resolve_papi_alias(params)
         await self.load_markets()
         market = None
         messageHash = ''
@@ -4141,6 +4203,8 @@ class binance(ccxt.async_support.binance):
         :param boolean [params.portfolioMargin]: set to True if you would like to watch trades in a portfolio margin account
         :returns dict[]: a list of `trade structures <https://docs.ccxt.com/?id=trade-structure>`
         """
+        # Patch 008: defaultType='papi' alias
+        params, _ = self.resolve_papi_alias(params)
         await self.load_markets()
         type = None
         market = None
