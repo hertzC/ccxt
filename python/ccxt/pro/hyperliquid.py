@@ -5,9 +5,12 @@
 
 import ccxt.async_support
 from ccxt.async_support.base.ws.cache import ArrayCache, ArrayCacheBySymbolById, ArrayCacheBySymbolBySide, ArrayCacheByTimestamp
-from ccxt.base.types import Any, Balances, Bool, Int, Market, Num, Order, OrderBook, OrderRequest, OrderSide, OrderType, Position, Str, Strings, Ticker, Tickers, Trade
+from ccxt.base.types import Any, Balances, Bool, FundingRate, FundingRates, Int, Market, Num, Order, OrderBook, OrderRequest, OrderSide, OrderType, Position, Str, Strings, Ticker, Tickers, Trade
 from ccxt.async_support.base.ws.client import Client
+from ccxt.async_support.base.ws.future import Future
 from typing import List
+from ccxt.base.errors import ArgumentsRequired
+from ccxt.base.errors import ExchangeError
 from ccxt.base.errors import NotSupported
 
 
@@ -23,6 +26,8 @@ class hyperliquid(ccxt.async_support.hyperliquid):
                 'createOrdersWs': True,
                 'editOrderWs': True,
                 'watchBalance': True,
+                'watchFundingRate': True,
+                'watchFundingRates': True,
                 'watchMyTrades': True,
                 'watchOHLCV': True,
                 'watchOrderBook': True,
@@ -630,6 +635,135 @@ class hyperliquid(ccxt.async_support.hyperliquid):
         # non-symbol specific
         messageHash = 'myTrades'
         client.resolve(trades, messageHash)
+
+    async def watch_funding_rate(self, symbol: str, params={}) -> FundingRate:
+        """
+        watch the current funding rate for a symbol
+
+        https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions
+
+        :param str symbol: unified market symbol
+        :param dict [params]: extra parameters specific to the exchange API endpoint
+        :returns dict: a `funding rate structure <https://docs.ccxt.com/?id=funding-rate-structure>`
+        """
+        rates = await self.watch_funding_rates([symbol], params)
+        return self.safe_dict(rates, symbol)
+
+    async def watch_funding_rates(self, symbols: Strings = None, params={}) -> FundingRates:
+        """
+        watch the funding rate for multiple markets
+
+        https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions
+
+        :param str[] symbols: unified market symbols
+        :param dict [params]: extra parameters specific to the exchange API endpoint
+        :returns dict[]: a dictionary of `funding rate structures <https://docs.ccxt.com/?id=funding-rate-structure>`, indexed by market symbols
+        """
+        await self.load_markets()
+        # activeAssetCtx is subscribed per coin — there is no all-markets form —
+        # so an explicit list is required. Raising here matches okx's behaviour
+        # for the same method rather than inventing a second convention.
+        if symbols is None:
+            raise ArgumentsRequired(self.id + ' watchFundingRates() requires an array of symbols')
+        symbols = self.market_symbols(symbols, None, False)
+        url = self.urls['api']['ws']['public']
+        # One subscribe frame PER COIN — the channel has no all-markets form and
+        # accepts no symbol array, so watch_multiple() cannot be used: it sends a
+        # single message, which would subscribe only the first symbol and leave
+        # every other future unresolved.
+        #
+        # watch() is not a coroutine; it registers the subscription, sends the
+        # frame on first call only (`if not subscribed`), and returns a future.
+        # So the loop below sends all N frames on one connection and the race
+        # resolves on whichever coin ticks first — matching the semantics of
+        # every other watch_* method, rather than gather()'s wait-for-all.
+        futures = []
+        for i in range(0, len(symbols)):
+            market = self.market(symbols[i])
+            messageHash = 'fundingRate:' + market['symbol']
+            request: dict = {
+                'method': 'subscribe',
+                'subscription': {
+                    'type': 'activeAssetCtx',
+                    'coin': market['baseName'] if market['swap'] else market['id'],
+                },
+            }
+            futures.append(self.watch(url, messageHash, self.extend(request, params), messageHash))
+        rate = await Future.race(futures)
+        if self.newUpdates:
+            result: dict = {}
+            result[rate['symbol']] = rate
+            return result
+        return self.filter_by_array(self.fundingRates, 'symbol', symbols)
+
+    def handle_active_asset_ctx(self, client: Client, message):
+        #
+        #     {
+        #         "channel": "activeAssetCtx",
+        #         "data": {
+        #             "coin": "BTC",
+        #             "ctx": {
+        #                 "funding": "0.0000125",
+        #                 "openInterest": "36764.32004",
+        #                 "prevDayPx": "65382.0",
+        #                 "dayNtlVlm": "2310213867.1083927155",
+        #                 "premium": "-0.0006435685",
+        #                 "oraclePx": "63551.9",
+        #                 "markPx": "63532.0",
+        #                 "midPx": "63507.5",
+        #                 "impactPxs": ["63498.0", "63511.0"],
+        #                 "dayBaseVlm": "35843.47866"
+        #             }
+        #         }
+        #     }
+        #
+        data = self.safe_dict(message, 'data', {})
+        coin = self.safe_string(data, 'coin')
+        if coin is None:
+            return
+        marketId = self.coin_to_market_id(coin)
+        market = self.safe_market(marketId, None, None, 'swap')
+        parsed = self.parse_ws_funding_rate(self.safe_dict(data, 'ctx', {}), market)
+        symbol = parsed['symbol']
+        self.fundingRates[symbol] = parsed
+        client.resolve(parsed, 'fundingRate:' + symbol)
+
+    def parse_ws_funding_rate(self, ctx, market: Market = None) -> FundingRate:
+        #
+        #     {
+        #         "funding": "0.0000125",
+        #         "premium": "-0.0006435685",
+        #         "oraclePx": "63551.9",
+        #         "markPx": "63532.0",
+        #         ...
+        #     }
+        #
+        # `funding` is a decimal fraction on Hyperliquid's HOURLY schedule —
+        # 0.0000125 is its 0.00125%/hour base rate. That is already the basis
+        # CCXT uses for fundingRate elsewhere, so it is passed through unscaled.
+        return {
+            'info': ctx,
+            'symbol': self.safe_string(market, 'symbol'),
+            'markPrice': self.safe_number(ctx, 'markPx'),
+            'indexPrice': self.safe_number(ctx, 'oraclePx'),
+            'interestRate': None,
+            'estimatedSettlePrice': None,
+            'timestamp': None,
+            'datetime': None,
+            'fundingRate': self.safe_number(ctx, 'funding'),
+            # The channel publishes no next-funding time. Left None rather than
+            # synthesising the next hour boundary: a computed timestamp that
+            # looks measured is worse than an absent one.
+            'fundingTimestamp': None,
+            'fundingDatetime': None,
+            'nextFundingRate': None,
+            'nextFundingTimestamp': None,
+            'nextFundingDatetime': None,
+            'previousFundingRate': None,
+            'previousFundingTimestamp': None,
+            'previousFundingDatetime': None,
+            'interval': '1h',
+        }
 
     async def watch_trades(self, symbol: str, since: Int = None, limit: Int = None, params={}) -> List[Trade]:
         """
@@ -1341,7 +1475,12 @@ class hyperliquid(ccxt.async_support.hyperliquid):
         if channel == 'error':
             ret_msg = self.safe_string(message, 'data', '')
             errorMsg = self.id + ' ' + ret_msg
-            client.reject(errorMsg)
+            # reject() forwards to Future.set_exception(), which requires an
+            # exception instance. Passing the raw string raised
+            # 'TypeError: invalid exception object' inside the receive loop and
+            # destroyed the venue's actual message, leaving callers with a bare
+            # TimeoutError and nothing to diagnose from.
+            client.reject(ExchangeError(self.id + ' ' + errorMsg))
             return True
         data = self.safe_dict(message, 'data', {})
         id = self.safe_string(message, 'id')
@@ -1528,6 +1667,7 @@ class hyperliquid(ccxt.async_support.hyperliquid):
             'userFills': self.handle_my_trades,
             'webData2': self.handle_ws_tickers,
             'allMids': self.handle_ws_tickers,
+            'activeAssetCtx': self.handle_active_asset_ctx,
             'post': self.handle_ws_post,
             'subscriptionResponse': self.handle_subscription_response,
             'clearinghouseState': self.handle_balance,
